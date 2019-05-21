@@ -8,11 +8,12 @@ from collections import Counter
 
 import pysam
 import pandas as pd
+from Bio.bgzf import BgzfWriter
 
 signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
 
-def pileup(bam, ref, minbq, minmq):
+def pileup(bam, ref, regions, minbq, minmq):
     """Sample bases in a given region of the genome based on the pileup
     of reads. If no coordinates were specified, sample from the whole BAM file.
     """
@@ -28,16 +29,18 @@ def pileup(bam, ref, minbq, minmq):
                 ref.fetch(col.reference_name, col.reference_pos, col.reference_pos + 1),
                 bases
             ))
-        if i % 50000 == 0: print(f"\r{i + 1} positions processed", end="")
+        if i % 50000 == 0 and i != 0: print(f"\r{i} positions processed", end="")
     print()
     pileups = pd.DataFrame(pileups, columns=["chrom", "pos", "ref", "pileup"]).query('ref != "N"')
     pileups["coverage"] = pileups.pileup.apply(lambda x: len(x))
+    if regions is not None:
+        pileups = pileups.loc[(pileups['chrom'] + "_" + pileups['pos'].map(str)).isin(regions)]
 
     return pileups
 
 
 def write_vcf(output, sites, sample_name):
-    with open(output + ".vcf", "w") as vcf:
+    with BgzfWriter(output + ".vcf.gz", "w") as vcf:
         print(
             "##fileformat=VCFv4.1\n"
             "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n"
@@ -77,6 +80,7 @@ if __name__ == "__main__":
     parser.add_argument("--mincov", help="Minimum coverage", type=int, default=0)
     parser.add_argument("--minbq", help="Minimum base quality", type=int, default=13)
     parser.add_argument("--minmq", help="Minimum read mapping quality", type=int, default=0)
+    parser.add_argument("--region", help="BED file for pileup to be performed on")
     parser.add_argument("--sample-name", help="Sample name to put in VCF/EIGENSTRAT")
     parser.add_argument("--format", help="Output formats", nargs="+", choices=["vcf", "eigenstrat", "pileup"], required=True)
     parser.add_argument("--output", help="Output file prefix", required=True)
@@ -96,7 +100,17 @@ if __name__ == "__main__":
         print("An indexed BAM file is required, please run 'samtools index' first", file=sys.stderr)
         sys.exit(1)
 
-    pileups = pileup(bam, ref, args.minbq, args.minmq).query(f"coverage >= {args.mincov}")
+    if args.region is not None:
+        regions = pd.read_csv(args.region, sep="\t",
+                              header=None,
+                              usecols=[0, 2],
+                              names=['chrom', 'pos'],
+                              low_memory=False)
+        regions = (regions['chrom'] + "_" + regions['pos'].map(str)).tolist()
+    else:
+        regions = None
+
+    pileups = pileup(bam, ref, regions, args.minbq, args.minmq).query(f"coverage >= {args.mincov}")
 
     if "pileup" in args.format:
         write_pileup(args.output, pileups)
